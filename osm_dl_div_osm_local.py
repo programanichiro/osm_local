@@ -192,7 +192,7 @@ handler = TileHandler()
 
 handler.apply_file(
     PBF_FILE,
-    locations=True
+    locations=False
 )
 
 print("done")
