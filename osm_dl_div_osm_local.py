@@ -9,7 +9,7 @@ PBF_FILE = "japan-latest.osm.pbf"
 # 約20km
 GRID_SIZE = 0.18
 
-OUT_DIR = "../osm_local/tiles"
+OUT_DIR = "tiles"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
