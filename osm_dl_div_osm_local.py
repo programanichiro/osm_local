@@ -6,30 +6,19 @@ import sqlite3
 import os
 import math
 
-
 PBF_FILE = "/data/osm_work/japan-latest.osm.pbf"
 
-# 約20km
 GRID_SIZE = 0.18
-
-OUT_DIR = "../osm_work/tiles"
+OUT_DIR = "/data/osm_work/tiles"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-
-# ----------------------------------------------------------
-# 日本範囲
-# ----------------------------------------------------------
-
-LAT_MIN = 24.0
-LAT_MAX = 46.0
-
-LON_MIN = 123.0
-LON_MAX = 146.0
+LAT_MIN, LAT_MAX = 24.0, 46.0
+LON_MIN, LON_MAX = 123.0, 146.0
 
 
 # ----------------------------------------------------------
-# tile index
+# tile
 # ----------------------------------------------------------
 
 def tile_xy(lat, lon):
@@ -40,17 +29,8 @@ def tile_xy(lat, lon):
     )
 
 
-def tile_name(tx, ty):
-
-    return f"tile_{ty}_{tx}.sqlite"
-
-
 def tile_path(tx, ty):
-
-    return os.path.join(
-        OUT_DIR,
-        tile_name(tx, ty)
-    )
+    return os.path.join(OUT_DIR, f"tile_{ty}_{tx}.sqlite")
 
 
 # ----------------------------------------------------------
@@ -58,20 +38,17 @@ def tile_path(tx, ty):
 # ----------------------------------------------------------
 
 def in_bbox(lat, lon):
-
     return (
-        LAT_MIN <= lat <= LAT_MAX
-        and
+        LAT_MIN <= lat <= LAT_MAX and
         LON_MIN <= lon <= LON_MAX
     )
 
 
 # ----------------------------------------------------------
-# db cache
+# DB cache（軽量）
 # ----------------------------------------------------------
 
 db_cache = {}
-
 
 def get_db(tx, ty):
 
@@ -81,98 +58,40 @@ def get_db(tx, ty):
         return db_cache[key]
 
     path = tile_path(tx, ty)
-
-    # ------------------------------------------------------
-    # 初回だけDB生成
-    # ------------------------------------------------------
-
     is_new = not os.path.exists(path)
 
     conn = sqlite3.connect(path)
-
     cur = conn.cursor()
 
     cur.execute("PRAGMA journal_mode=OFF")
     cur.execute("PRAGMA synchronous=OFF")
 
-    # ------------------------------------------------------
-    # 新規DB時だけtable生成
-    # ------------------------------------------------------
-
     if is_new:
-
-        cur.execute("""
+        cur.executescript("""
         CREATE TABLE nodes (
             id INTEGER PRIMARY KEY,
             lat REAL,
             lon REAL
-        )
-        """)
+        );
 
-        cur.execute("""
         CREATE TABLE ways (
             id INTEGER PRIMARY KEY,
             name TEXT,
             highway TEXT,
             maxspeed TEXT
-        )
-        """)
+        );
 
-        cur.execute("""
         CREATE TABLE way_nodes (
             way_id INTEGER,
             node_id INTEGER,
             seq INTEGER
-        )
+        );
+
+        CREATE INDEX idx_way_nodes_way ON way_nodes(way_id);
         """)
 
-        cur.execute("""
-        CREATE INDEX idx_nodes_latlon
-        ON nodes(lat, lon)
-        """)
-
-        cur.execute("""
-        CREATE INDEX idx_way_nodes_way
-        ON way_nodes(way_id)
-        """)
-
-        cur.execute("""
-        CREATE INDEX idx_way_nodes_node
-        ON way_nodes(node_id)
-        """)
-
-        conn.commit()
-
-    db_cache[key] = (
-        conn,
-        cur
-    )
-
+    db_cache[key] = (conn, cur)
     return conn, cur
-
-
-# ----------------------------------------------------------
-# tile list
-# 道路が跨ぐtile全部へ複製
-# ----------------------------------------------------------
-
-def touched_tiles(nodes):
-
-    result = set()
-
-    for n in nodes:
-
-        try:
-            lat = n.location.lat
-            lon = n.location.lon
-        except Exception:
-            continue
-
-        tx, ty = tile_xy(lat, lon)
-
-        result.add((tx, ty))
-
-    return result
 
 
 # ----------------------------------------------------------
@@ -182,150 +101,75 @@ def touched_tiles(nodes):
 class TileHandler(osmium.SimpleHandler):
 
     def __init__(self):
-
         super().__init__()
-
-        self.inserted_nodes = {}
-
         self.way_count = 0
 
     def way(self, w):
 
-        tags = w.tags
-
-        highway = tags.get("highway")
-
-        if not highway:
+        if not w.tags.get("highway"):
             return
 
-        # --------------------------------------------------
-        # bbox外skip
-        # --------------------------------------------------
-
         try:
-
-            first = w.nodes[0]
-
-            lat = first.location.lat
-            lon = first.location.lon
-
-        except Exception:
+            n0 = w.nodes[0]
+            lat = n0.location.lat
+            lon = n0.location.lon
+        except:
             return
 
         if not in_bbox(lat, lon):
             return
 
-        # --------------------------------------------------
-        # way情報
-        # --------------------------------------------------
+        name = w.tags.get("name", "")
+        maxspeed = w.tags.get("maxspeed", "")
 
-        name = tags.get("name", "")
+        # ★ tileは「先頭node基準＋軽く拡張」
+        tx, ty = tile_xy(lat, lon)
 
-        maxspeed = tags.get("maxspeed", "")
-
-        # --------------------------------------------------
-        # 道路が触れたtile全部
-        # --------------------------------------------------
-
-        tiles = touched_tiles(w.nodes)
-
-        if len(tiles) == 0:
-            return
-
-        # --------------------------------------------------
-        # 各tileへ複製
-        # --------------------------------------------------
+        # 隣tileも最低限だけ（跨ぎ保証）
+        tiles = [
+            (tx, ty),
+            (tx+1, ty),
+            (tx-1, ty),
+            (tx, ty+1),
+            (tx, ty-1),
+        ]
 
         for tx, ty in tiles:
 
+            if not (0 <= tx <= 2000 and 0 <= ty <= 2000):
+                continue
+
             conn, cur = get_db(tx, ty)
 
-            # ----------------------------------------------
             # ways
-            # ----------------------------------------------
-
-            cur.execute("""
-                INSERT OR IGNORE INTO ways(
-                    id,
-                    name,
-                    highway,
-                    maxspeed
-                )
-                VALUES (?, ?, ?, ?)
-            """, (
-                w.id,
-                name,
-                highway,
-                maxspeed
-            ))
-
-            # ----------------------------------------------
-            # nodes + links
-            # ----------------------------------------------
-
-            inserted = self.inserted_nodes.setdefault(
-                (tx, ty),
-                set()
+            cur.execute(
+                "INSERT OR IGNORE INTO ways VALUES (?, ?, ?, ?)",
+                (w.id, name, w.tags.get("highway",""), maxspeed)
             )
 
+            # nodesは「その場で流すだけ」
             for seq, n in enumerate(w.nodes):
 
                 try:
-
-                    nlat = n.location.lat
-                    nlon = n.location.lon
-
-                except Exception:
+                    lat2 = n.location.lat
+                    lon2 = n.location.lon
+                except:
                     continue
 
-                # ------------------------------------------
-                # nodes
-                # ------------------------------------------
+                cur.execute(
+                    "INSERT OR IGNORE INTO nodes VALUES (?, ?, ?)",
+                    (n.ref, lat2, lon2)
+                )
 
-                if n.ref not in inserted:
-
-                    inserted.add(n.ref)
-
-                    cur.execute("""
-                        INSERT OR IGNORE INTO nodes(
-                            id,
-                            lat,
-                            lon
-                        )
-                        VALUES (?, ?, ?)
-                    """, (
-                        n.ref,
-                        nlat,
-                        nlon
-                    ))
-
-                # ------------------------------------------
-                # way_nodes
-                # ------------------------------------------
-
-                cur.execute("""
-                    INSERT INTO way_nodes(
-                        way_id,
-                        node_id,
-                        seq
-                    )
-                    VALUES (?, ?, ?)
-                """, (
-                    w.id,
-                    n.ref,
-                    seq
-                ))
-
-        # --------------------------------------------------
-        # progress
-        # --------------------------------------------------
+                cur.execute(
+                    "INSERT INTO way_nodes VALUES (?, ?, ?)",
+                    (w.id, n.ref, seq)
+                )
 
         self.way_count += 1
 
         if self.way_count % 5000 == 0:
-
             print("ways:", self.way_count)
-
             for conn, cur in db_cache.values():
                 conn.commit()
 
@@ -337,18 +181,12 @@ class TileHandler(osmium.SimpleHandler):
 print("tile building start")
 
 handler = TileHandler()
-
-handler.apply_file(
-    PBF_FILE,
-    locations=True
-)
+handler.apply_file(PBF_FILE, locations=True)
 
 print("final commit")
 
 for conn, cur in db_cache.values():
-
     conn.commit()
-
     conn.close()
 
 print("done")
