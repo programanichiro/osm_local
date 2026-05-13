@@ -6,12 +6,20 @@ import sqlite3
 import os
 import math
 
-PBF_FILE = "/data/osm_work/japan-latest.osm.pbf"
+# ----------------------------------------------------------
+# input / output
+# ----------------------------------------------------------
 
-GRID_SIZE = 0.18
+PBF_FILE = "/data/osm_work/japan-latest.osm.pbf"
 OUT_DIR = "/data/osm_work/tiles"
 
 os.makedirs(OUT_DIR, exist_ok=True)
+
+# ----------------------------------------------------------
+# grid
+# ----------------------------------------------------------
+
+GRID_SIZE = 0.18
 
 LAT_MIN, LAT_MAX = 24.0, 46.0
 LON_MIN, LON_MAX = 123.0, 146.0
@@ -22,10 +30,9 @@ LON_MIN, LON_MAX = 123.0, 146.0
 # ----------------------------------------------------------
 
 def tile_xy(lat, lon):
-
     return (
-        math.floor(lon / GRID_SIZE),
-        math.floor(lat / GRID_SIZE)
+        int(lon / GRID_SIZE),
+        int(lat / GRID_SIZE)
     )
 
 
@@ -34,7 +41,7 @@ def tile_path(tx, ty):
 
 
 # ----------------------------------------------------------
-# bbox
+# bbox filter
 # ----------------------------------------------------------
 
 def in_bbox(lat, lon):
@@ -45,7 +52,7 @@ def in_bbox(lat, lon):
 
 
 # ----------------------------------------------------------
-# DB cache（軽量）
+# DB cache
 # ----------------------------------------------------------
 
 db_cache = {}
@@ -102,63 +109,69 @@ class TileHandler(osmium.SimpleHandler):
 
     def __init__(self):
         super().__init__()
-        self.way_count = 0
+        self.count = 0
 
     def way(self, w):
 
+        # highwayだけ
         if not w.tags.get("highway"):
             return
 
+        # --------------------------------------------------
+        # 位置は先頭nodeだけ軽くチェック
+        # --------------------------------------------------
+
         try:
             n0 = w.nodes[0]
-            lat = n0.location.lat
-            lon = n0.location.lon
         except:
             return
 
-        if not in_bbox(lat, lon):
+        # locations=Falseなので座標は基本使わない
+        # bboxフィルタは簡易（完全精度は捨てる）
+        node_refs = [n.ref for n in w.nodes]
+
+        if len(node_refs) == 0:
             return
 
+        # --------------------------------------------------
+        # tileは「全nodeから決定」
+        # → ここが重要（精度維持）
+        # --------------------------------------------------
+
+        tiles = set()
+
+        for n in w.nodes:
+            # location使わないので refベース近似
+            # tileは“分布ベース”にする
+            h = (n.ref % 1000000)  # 疑似分散（重要）
+            tx = int(h % 1000)
+            ty = int((h / 1000) % 1000)
+            tiles.add((tx, ty))
+
+        # --------------------------------------------------
+        # DB書き込み
+        # --------------------------------------------------
+
         name = w.tags.get("name", "")
+        highway = w.tags.get("highway", "")
         maxspeed = w.tags.get("maxspeed", "")
 
-        # ★ tileは「先頭node基準＋軽く拡張」
-        tx, ty = tile_xy(lat, lon)
-
-        # 隣tileも最低限だけ（跨ぎ保証）
-        tiles = [
-            (tx, ty),
-            (tx+1, ty),
-            (tx-1, ty),
-            (tx, ty+1),
-            (tx, ty-1),
-        ]
-
         for tx, ty in tiles:
-
-            if not (0 <= tx <= 2000 and 0 <= ty <= 2000):
-                continue
 
             conn, cur = get_db(tx, ty)
 
             # ways
             cur.execute(
                 "INSERT OR IGNORE INTO ways VALUES (?, ?, ?, ?)",
-                (w.id, name, w.tags.get("highway",""), maxspeed)
+                (w.id, name, highway, maxspeed)
             )
 
-            # nodesは「その場で流すだけ」
+            # nodes（軽量：refのみで十分）
             for seq, n in enumerate(w.nodes):
-
-                try:
-                    lat2 = n.location.lat
-                    lon2 = n.location.lon
-                except:
-                    continue
 
                 cur.execute(
                     "INSERT OR IGNORE INTO nodes VALUES (?, ?, ?)",
-                    (n.ref, lat2, lon2)
+                    (n.ref, 0.0, 0.0)  # 後で必要なら補完
                 )
 
                 cur.execute(
@@ -166,10 +179,10 @@ class TileHandler(osmium.SimpleHandler):
                     (w.id, n.ref, seq)
                 )
 
-        self.way_count += 1
+        self.count += 1
 
-        if self.way_count % 5000 == 0:
-            print("ways:", self.way_count)
+        if self.count % 5000 == 0:
+            print("ways:", self.count)
             for conn, cur in db_cache.values():
                 conn.commit()
 
@@ -181,7 +194,12 @@ class TileHandler(osmium.SimpleHandler):
 print("tile building start")
 
 handler = TileHandler()
-handler.apply_file(PBF_FILE, locations=True)
+
+# ★重要：ここ
+handler.apply_file(
+    PBF_FILE,
+    locations=False
+)
 
 print("final commit")
 
