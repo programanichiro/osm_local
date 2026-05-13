@@ -1,15 +1,18 @@
+import sys
+sys.path.insert(0, "/data/osm_work/pydeps")
+
 import osmium
 import sqlite3
 import os
 import math
 
 
-PBF_FILE = "japan-latest.osm.pbf"
+PBF_FILE = "/data/osm_work/japan-latest.osm.pbf"
 
 # 約20km
 GRID_SIZE = 0.18
 
-OUT_DIR = "tiles"
+OUT_DIR = "../osm_work/tiles"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
